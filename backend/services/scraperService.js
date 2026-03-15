@@ -1,26 +1,27 @@
-// 1. Updated Imports
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-// Note: You must run 'npm install @sparticuz/chromium-min' and 'npm uninstall @sparticuz/chromium'
-const chromium = require('@sparticuz/chromium-min'); 
+const chromium = require('@sparticuz/chromium'); // The layer provides this
 
 puppeteer.use(StealthPlugin());
 
-// 2. Updated launchBrowser Function
 async function launchBrowser(options = {}) {
   const isLambda = process.env.AWS_EXECUTION_ENV !== undefined;
-  let browser;
 
   if (isLambda) {
-    // --- AWS PRODUCTION SETTINGS (Using Layer) ---
-    browser = await puppeteer.launch({
-      args: chromium.args,
-      defaultViewport: chromium.defaultViewport,
-      // chromium-min automatically finds the binary in /opt/nodejs/node_modules/@sparticuz/chromium/bin
-      executablePath: await chromium.executablePath(), 
-      headless: chromium.headless,
-      ...options,
-    });
+    // --- AWS PRODUCTION SETTINGS (Using the Layer you have) ---
+    return {
+      browser: await puppeteer.launch({
+        args: chromium.args,
+        defaultViewport: chromium.defaultViewport,
+        executablePath: await chromium.executablePath(), // This now points to /opt
+        headless: chromium.headless,
+        ...options,
+      }),
+      page: await (await puppeteer.launch({ 
+          args: chromium.args, 
+          executablePath: await chromium.executablePath() 
+      })).newPage() // Cleaner to just return the browser and let the function create the page
+    };
   } else {
     // --- LOCAL WINDOWS SETTINGS ---
     browser = await puppeteer.launch({
