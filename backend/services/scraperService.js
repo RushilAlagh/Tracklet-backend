@@ -1,6 +1,7 @@
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const chromium = require('@sparticuz/chromium'); // The layer provides this
+// Use the layer version of chromium, not the -min version
+const chromium = require('@sparticuz/chromium'); 
 
 puppeteer.use(StealthPlugin());
 
