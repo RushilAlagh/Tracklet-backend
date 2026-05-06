@@ -51,6 +51,8 @@ async function updateNotificationSent(productID, userEmail) {
  */
 async function monitorProductsAndScrape() {
   console.log("🚀 Starting monitoring cycle...");
+  console.log("📌 SEND_EMAILS =", process.env.SEND_EMAILS);
+
   const trackedProducts = await fetchAllTrackedProducts();
 
   if (trackedProducts.length === 0) {
@@ -58,10 +60,8 @@ async function monitorProductsAndScrape() {
     return { message: "No products to monitor." };
   }
 
-  // CHUNK_SIZE: How many products to scrape simultaneously. 
-  // 3 is a safe number for 2GB Lambda memory.
-  const CHUNK_SIZE = 3; 
-  
+  const CHUNK_SIZE = 3;
+
   for (let i = 0; i < trackedProducts.length; i += CHUNK_SIZE) {
     const chunk = trackedProducts.slice(i, i + CHUNK_SIZE);
     console.log(`Processing batch ${Math.floor(i / CHUNK_SIZE) + 1}...`);
@@ -69,9 +69,10 @@ async function monitorProductsAndScrape() {
     await Promise.all(chunk.map(async (product) => {
       const { Product_ID, User_Email, Product_URL, Threshold_Value, NotificationSent } = product;
 
-      // Don't re-scrape/re-alert if user was already notified of a drop
+      // Skip if already notified
       if (NotificationSent === true) {
-        return; 
+        console.log(`⏭️ Skipping ${Product_ID} (already notified)`);
+        return;
       }
 
       try {
@@ -82,29 +83,39 @@ async function monitorProductsAndScrape() {
           return;
         }
 
-        // Clean price string (e.g., "₹12,999" -> 12999)
-        const numericPrice = parseFloat(scrapedPriceStr.replace(/[^0-9.]/g, ''));
-        
+        const numericPrice = parseFloat(
+          scrapedPriceStr.replace(/[^0-9.]/g, '')
+        );
+
         if (isNaN(numericPrice)) {
           console.warn(`⚠️ Invalid numeric price for ${Product_ID}: ${scrapedPriceStr}`);
           return;
         }
 
-        // 1. Log price to history table
+        console.log(`💰 ${Product_ID} price: ${numericPrice} | Threshold: ${Threshold_Value}`);
+
+        // 1. Save price history
         await saveScrapeResult(Product_ID, User_Email, numericPrice);
 
         // 2. Check threshold
         if (numericPrice <= Number(Threshold_Value)) {
           console.log(`💥 PRICE DROP DETECTED: ${numericPrice} (Threshold: ${Threshold_Value})`);
-          
-          // Send the actual email
-          await sendPriceDropAlert(User_Email, Product_URL, numericPrice);
-          
-          // Mark as notified so we don't send an email every hour!
+
+          // ✅ Controlled email sending
+          if (process.env.SEND_EMAILS === "true") {
+            await sendPriceDropAlert(User_Email, Product_URL, numericPrice);
+            console.log(`📧 Email sent to ${User_Email}`);
+          } else {
+            console.log("📭 Email skipped (SEND_EMAILS=false)");
+          }
+
+          // Mark as notified
           await updateNotificationSent(Product_ID, User_Email);
+
         } else {
           console.log(`✅ ${Product_ID} is stable at ${numericPrice}`);
         }
+
       } catch (error) {
         console.error(`❌ Failed to process Product ${Product_ID}:`, error.message);
       }

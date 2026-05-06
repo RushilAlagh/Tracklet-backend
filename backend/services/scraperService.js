@@ -1,49 +1,49 @@
-const puppeteer = require('puppeteer-extra');
+// Force puppeteer-extra to use puppeteer-core
+const { addExtra } = require('puppeteer-extra');
+const puppeteerCore = require('puppeteer-core');
+const puppeteer = addExtra(puppeteerCore);
+
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-// Use the layer version of chromium, not the -min version
-const chromium = require('@sparticuz/chromium'); 
+const chromium = require('@sparticuz/chromium');
 
 puppeteer.use(StealthPlugin());
 
 async function launchBrowser(options = {}) {
   const isLambda = process.env.AWS_EXECUTION_ENV !== undefined;
 
+  let browser;
+
   if (isLambda) {
-    // --- AWS PRODUCTION SETTINGS (Using the Layer you have) ---
-    return {
-      browser: await puppeteer.launch({
-        args: chromium.args,
-        defaultViewport: chromium.defaultViewport,
-        executablePath: await chromium.executablePath(), // This now points to /opt
-        headless: chromium.headless,
-        ...options,
-      }),
-      page: await (await puppeteer.launch({ 
-          args: chromium.args, 
-          executablePath: await chromium.executablePath() 
-      })).newPage() // Cleaner to just return the browser and let the function create the page
-    };
-  } else {
-    // --- LOCAL WINDOWS SETTINGS ---
+    // ✅ AWS Lambda
     browser = await puppeteer.launch({
-      headless: "new", 
-      defaultViewport: null, 
-      executablePath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", 
+      args: chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath(),
+      headless: chromium.headless,
+      ...options,
+    });
+  } else {
+    // ✅ Local (Windows)
+    browser = await puppeteer.launch({
+      headless: "new",
+      defaultViewport: null,
+      executablePath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
         '--no-zygote',
-        '--window-size=1920,1080', 
-        '--disable-blink-features=AutomationControlled' 
+        '--window-size=1920,1080',
+        '--disable-blink-features=AutomationControlled'
       ],
       ...options,
     });
   }
-  
+
   const page = await browser.newPage();
 
+  // Hide automation
   await page.evaluateOnNewDocument(() => {
     Object.defineProperty(navigator, 'webdriver', {
       get: () => undefined,
@@ -52,6 +52,8 @@ async function launchBrowser(options = {}) {
 
   return { browser, page };
 }
+
+module.exports = { launchBrowser };
 
 // Set user agent and block unnecessary resources
 async function setUserAgentAndBlockResources(page) {
@@ -66,9 +68,11 @@ async function setUserAgentAndBlockResources(page) {
   });
 }
 
-// Amazon Scraper
+// AMAZON SCRAPER (FULL FIXED VERSION)
+
 const scrapeAmazon = async (url) => {
   let browser, page;
+
   try {
     const browserInstance = await launchBrowser();
     browser = browserInstance.browser;
@@ -76,188 +80,221 @@ const scrapeAmazon = async (url) => {
 
     await setUserAgentAndBlockResources(page);
 
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.goto(url, {
+      waitUntil: 'networkidle2',
+      timeout: 60000
+    });
+
+    // Wait for dynamic content
+    await new Promise(r => setTimeout(r, 3000));
+
+    // Wait until price appears (best signal)
+    try {
+      await page.waitForFunction(
+        () => document.body.innerText.includes('₹'),
+        { timeout: 10000 }
+      );
+    } catch (e) {
+      console.log("⚠️ Timeout waiting for price to load");
+    }
 
     const priceText = await page.evaluate(() => {
       let priceElement;
 
+      // ✅ BEST selector (full price with ₹)
+      priceElement = document.querySelector('.a-price .a-offscreen');
+      if (priceElement) return priceElement.innerText;
+
+      // Fallback 1
       priceElement = document.querySelector('.apexPriceToPay .a-offscreen');
       if (priceElement) return priceElement.innerText;
 
+      // Fallback 2
       priceElement = document.querySelector('#corePriceDisplay_desktop_feature_div .a-price-whole');
       if (priceElement) return priceElement.innerText;
-      
+
+      // Fallback 3
       priceElement = document.querySelector('#apex_desktop .a-price-whole');
       if (priceElement) return priceElement.innerText;
 
+      // Fallback 4
       priceElement = document.querySelector('#priceblock_ourprice');
       if (priceElement) return priceElement.innerText;
 
+      // Fallback 5
+      priceElement = document.querySelector('#priceblock_dealprice');
+      if (priceElement) return priceElement.innerText;
+
+      // Fallback 6 (your original)
       priceElement = document.querySelector('.a-price-whole');
       if (priceElement) return priceElement.innerText;
 
-      return null; 
+      // 🔥 Smart fallback (VERY IMPORTANT — keep this)
+      const elements = Array.from(document.querySelectorAll('span, div, p'));
+      const priceRegex = /₹\s?(\d{1,3}(,\d{2,3})*)/;
+
+      for (let el of elements) {
+        if (
+          el.children.length === 0 &&
+          el.textContent &&
+          priceRegex.test(el.textContent)
+        ) {
+          return el.textContent.trim();
+        }
+      }
+
+      return null;
     });
 
     if (!priceText) {
       console.log(`⚠️ Could not find any price selectors for URL: ${url}`);
+
+      // Debug screenshot
+      await page.screenshot({
+        path: 'amazon-error.png',
+        fullPage: true
+      });
+
+      console.log("📸 Saved debug screenshot: amazon-error.png");
       return null;
     }
 
+    console.log(`💰 Amazon price found: ${priceText}`);
     return priceText;
 
   } catch (error) {
-    console.error(`Error scraping Amazon: ${error.message}`);
+    console.error(`❌ Error scraping Amazon: ${error.message}`);
     return null;
   } finally {
     if (browser) await browser.close();
   }
 };
 
-// Ajio Scraper
-async function scrapeAjio(url) {
+// --- NEW: Snapdeal Scraper ---
+async function scrapeSnapdeal(url) {
   let browser, page;
   try {
     const browserInstance = await launchBrowser();
     browser = browserInstance.browser;
     page = browserInstance.page;
 
-    // 1. Call the standard, shared setup function first
     await setUserAgentAndBlockResources(page);
     
-    // 2. ONLY for Ajio: Inject realistic HTTP headers to look like a human Chrome user
-    await page.setExtraHTTPHeaders({
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-      'Accept-Encoding': 'gzip, deflate, br',
-      'Sec-Ch-Ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-      'Sec-Ch-Ua-Mobile': '?0',
-      'Sec-Ch-Ua-Platform': '"Windows"',
-      'Sec-Fetch-Dest': 'document',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Site': 'none',
-      'Sec-Fetch-User': '?1',
-      'Upgrade-Insecure-Requests': '1'
-    });
-
-    // Ajio is a heavy SPA, so we MUST wait for the network to idle
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-
-    // Add a random delay to simulate human loading time
-    await new Promise(r => setTimeout(r, 2000 + Math.random() * 1000));
-
-    // Wait until at least one element with a Rupee symbol appears (max 10s)
-    try {
-      await page.waitForFunction(
-        () => document.body.innerText.includes('₹'),
-        { timeout: 10000 }
-      );
-    } catch (e) {
-      console.log("Timed out waiting for Rupee symbol to appear on Ajio.");
-    }
+    await new Promise(r => setTimeout(r, 2000)); // Human delay
 
     const priceText = await page.evaluate(() => {
-      // Priority 1: Check the exact classes we know Ajio uses
-      const classes = ['.prod-sp', '.price .prod-sp', '.price-section .price'];
-      for (let selector of classes) {
-        const el = document.querySelector(selector);
-        // Using textContent to bypass headless rendering quirks
-        if (el && el.textContent && el.textContent.includes('₹')) {
-          return el.textContent.trim();
-        }
-      }
+      // Priority 1: Snapdeal's standard price class
+      const el = document.querySelector('.payBlkBig');
+      if (el && el.textContent) return el.textContent.trim();
 
-      // Priority 2: The "Smart Search" fallback
-      const elements = Array.from(document.querySelectorAll('div, span, p'));
-      const priceRegex = /₹\s?(\d{1,3}(,\d{2,3})*)/; 
+      // Priority 2: Smart Search Fallback
+      const elements = Array.from(document.querySelectorAll('span, div'));
+      const priceRegex = /^(?:Rs\.?|INR|₹)\s?(\d{1,3}(?:,\d{2,3})*)/i; 
       
       for (let el of elements) {
-        if (el.children.length === 0 && el.textContent && priceRegex.test(el.textContent)) {
+        if (el.children.length === 0 && el.textContent && priceRegex.test(el.textContent.trim())) {
            return el.textContent.trim();
         }
       }
-
       return null;
     });
 
     if (!priceText) {
-      console.log(`⚠️ Could not find Ajio price selectors for URL: ${url}`);
-      // Take a photograph to see if Ajio is blocking us!
-      await page.screenshot({ path: 'ajio-error.png', fullPage: true });
-      console.log(`📸 Saved debug screenshot to ajio-error.png`);
+      console.log(`⚠️ Could not find Snapdeal price for: ${url}`);
       return null;
     }
 
     return priceText;
-
   } catch (error) {
-    console.error(`Error scraping Ajio: ${error.message}`);
+    console.error(`❌ Error scraping Snapdeal: ${error.message}`);
     return null;
   } finally {
     if (browser) await browser.close();
   }
 }
 
-// Flipkart Scraper
-async function scrapeFlipkart(url) {
+// --- BULLETPROOF: Reliance Digital Scraper ---
+async function scrapeRelianceDigital(url) {
   let browser, page;
   try {
     const browserInstance = await launchBrowser();
     browser = browserInstance.browser;
     page = browserInstance.page;
 
-    await setUserAgentAndBlockResources(page);
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-
-    // Add a 2-second random delay to simulate human loading time
-    await new Promise(r => setTimeout(r, 2000 + Math.random() * 1000));
-
-    // Wait until at least one element with a Rupee symbol appears (max 10s)
+    // Aggressive blocking: Stop images, fonts, media, and websockets. Allow only essentials.
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const blocked = ['image', 'media', 'font', 'websocket', 'manifest'];
+      if (blocked.includes(req.resourceType())) {
+        req.abort(); 
+      } else {
+        req.continue(); 
+      }
+    });
+    
+    // 🚀 THE NUCLEAR OPTION: Try to load, but ignore timeouts
     try {
-      await page.waitForFunction(
-        () => document.body.innerText.includes('₹'),
-        { timeout: 10000 }
-      );
+      // Cut timeout to 30s. If it hangs past this, we force it to move on.
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     } catch (e) {
-      console.log("Timed out waiting for Rupee symbol to appear.");
+      console.log("⚠️ page.goto timed out, but proceeding to check for the price anyway...");
+    }
+
+    // Give Vue.js a few seconds to inject the price into the HTML
+    await new Promise(r => setTimeout(r, 3000));
+
+    try {
+      await page.waitForSelector('.product-price', { timeout: 10000 });
+    } catch (e) {
+      console.log("⚠️ Timed out waiting for .product-price to appear on Reliance Digital.");
     }
 
     const priceText = await page.evaluate(() => {
-      // Priority 1: Check the exact classes we've seen
-      const classes = ['.v1zwn21k.v1zwn20', '._1psv1zeb9._1psv1ze0', '.Nx9bqj.CxhGGd', '._30jeq3._16Jk6d', '._1vC4OE._3qQ9m1', '.Nx9bqj'];
-      for (let selector of classes) {
-        const el = document.querySelector(selector);
-        // Using textContent to bypass headless rendering quirks
-        if (el && el.textContent && el.textContent.includes('₹')) {
-          return el.textContent.trim();
+      // Priority 1: The exact class from the Vue.js frontend
+      const semanticSelectors = [
+        '.product-price',
+        '.pdp__priceSection__priceListText', 
+        '.pdp__priceSection__priceListTextString'
+      ];
+      
+      for (let selector of semanticSelectors) {
+        const elements = document.querySelectorAll(selector);
+        for (let el of elements) {
+          if (el && el.textContent && el.textContent.includes('₹')) {
+            return el.textContent.trim();
+          }
         }
       }
 
-      // Priority 2: The "Smart Search" fallback
-      const elements = Array.from(document.querySelectorAll('div, span, p'));
-      const priceRegex = /₹\s?(\d{1,3}(,\d{2,3})*)/; 
+      // Priority 2: Smart Search Fallback
+      const elements = Array.from(document.querySelectorAll('span, li, div, p'));
+      const priceRegex = /₹\s?(\d{1,3}(,\d{2,3})*(\.\d{1,2})?)/; 
       
       for (let el of elements) {
         if (el.children.length === 0 && el.textContent && priceRegex.test(el.textContent)) {
-           return el.textContent.trim();
+           if (!el.textContent.toLowerCase().includes('mo') && !el.closest('.emi-block')) {
+               return el.textContent.trim();
+           }
         }
       }
-
       return null;
     });
 
     if (!priceText) {
-      console.log(`⚠️ Could not find Flipkart price selectors for URL: ${url}`);
-      await page.screenshot({ path: 'flipkart-error.png', fullPage: true });
-      console.log(`📸 Saved debug screenshot to flipkart-error.png`);
+      console.log(`⚠️ Could not find Reliance Digital price selectors for URL: ${url}`);
+      await page.screenshot({ path: 'reliance-error.png', fullPage: true });
+      console.log(`📸 Saved debug screenshot to reliance-error.png`);
       return null;
     }
 
+    console.log(`💰 Reliance Digital price found: ${priceText}`);
     return priceText;
 
   } catch (error) {
-    console.error(`Error scraping Flipkart: ${error.message}`);
+    console.error(`❌ Error scraping Reliance Digital: ${error.message}`);
     return null;
   } finally {
     if (browser) await browser.close();
@@ -352,13 +389,240 @@ async function scrapeNykaa(url) {
   }
 }
 
-// Main export
-async function scrapeProductPrice(url) {
-  if (url.includes('amazon')) return await scrapeAmazon(url);
-  else if (url.includes('ajio')) return await scrapeAjio(url);
-  else if (url.includes('flipkart')) return await scrapeFlipkart(url);
-  else if (url.includes('nykaa')) return await scrapeNykaa(url);
-  else throw new Error('Unsupported website');
+// --- NEW: Myntra Scraper ---
+async function scrapeMyntra(url) {
+  let browser, page;
+  try {
+    const browserInstance = await launchBrowser();
+    browser = browserInstance.browser;
+    page = browserInstance.page;
+
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    
+    // Aggressive blocking: Allow stylesheets, block heavy media/fonts
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const blocked = ['image', 'media', 'font', 'websocket', 'manifest'];
+      if (blocked.includes(req.resourceType())) {
+        req.abort(); 
+      } else {
+        req.continue(); 
+      }
+    });
+    
+    // 🚀 THE NUCLEAR OPTION: Try to load, but ignore timeouts
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    } catch (e) {
+      console.log("⚠️ page.goto timed out for Myntra, checking for price anyway...");
+    }
+
+    // Give React time to render
+    await new Promise(r => setTimeout(r, 3000));
+
+    const priceText = await page.evaluate(() => {
+      // Priority 1: Semantic Myntra Classes
+      const semanticSelectors = ['.pdp-price', '.pdp-selling-price', 'span.pdp-price'];
+      for (let selector of semanticSelectors) {
+        const elements = document.querySelectorAll(selector);
+        for (let el of elements) {
+          if (el && el.textContent && el.textContent.includes('₹')) {
+            return el.textContent.trim();
+          }
+        }
+      }
+
+      // Priority 2: Smart Search Fallback
+      const elements = Array.from(document.querySelectorAll('span, div, h1, h2, h3, h4, strong, b'));
+      const priceRegex = /₹\s?(\d{1,3}(,\d{2,3})*)/; 
+      
+      for (let el of elements) {
+        if (el.children.length === 0 && el.textContent && priceRegex.test(el.textContent)) {
+           // Skip MRP strikethroughs
+           const style = window.getComputedStyle(el);
+           if (!style.textDecoration.includes('line-through') && !el.closest('.pdp-mrp')) {
+               return el.textContent.trim();
+           }
+        }
+      }
+      return null;
+    });
+
+    if (!priceText) {
+      console.log(`⚠️ Could not find Myntra price selectors for URL: ${url}`);
+      await page.screenshot({ path: 'myntra-error.png', fullPage: true });
+      return null;
+    }
+
+    console.log(`💰 Myntra price found: ${priceText}`);
+    return priceText;
+
+  } catch (error) {
+    console.error(`❌ Error scraping Myntra: ${error.message}`);
+    return null;
+  } finally {
+    if (browser) await browser.close();
+  }
 }
 
-module.exports = { scrapeProductPrice };
+// --- FINAL: JioMart Scraper (Robust 404 & Stock Checking) ---
+async function scrapeJioMart(url) {
+  let browser, page;
+  try {
+    const browserInstance = await launchBrowser();
+    browser = browserInstance.browser;
+    page = browserInstance.page;
+
+    // Force a massive desktop viewport so we don't get the mobile layout
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+    
+    // Block heavy assets to speed up loading
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      if (['image', 'media', 'websocket'].includes(req.resourceType())) {
+        req.abort(); 
+      } else {
+        req.continue(); 
+      }
+    });
+    
+    // Load the page
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    } catch (e) {
+      console.log("⚠️ page.goto timed out for JioMart, checking anyway...");
+    }
+
+    // Small delay to let the initial JS framework boot up
+    await new Promise(r => setTimeout(r, 2000));
+
+    // Clear any location popups
+    await page.keyboard.press('Escape');
+    await new Promise(r => setTimeout(r, 500));
+    
+    // 🛑 THE FIX: Wait for EITHER the price to appear OR an error message to appear
+    try {
+        await page.waitForFunction(() => {
+            const text = (document.body.innerText || "").toLowerCase();
+            const isDead = text.includes('currently unavailable') || 
+                           text.includes('out of stock') || 
+                           text.includes('sold out') ||
+                           text.includes('page not found') ||
+                           text.includes('we couldn\'t find the page') ||
+                           text.includes('something went wrong');
+            const hasPrice = !!document.querySelector('.PriceContainer__currentPrice, .jm-heading-xl, .product-price');
+            
+            return isDead || hasPrice;
+        }, { timeout: 15000 });
+    } catch (e) {
+        console.log("⚠️ Timed out waiting for JioMart to resolve state.");
+    }
+
+    // 🛑 Now explicitly evaluate the text to get a clean true/false boolean
+    const isUnavailable = await page.evaluate(() => {
+        const text = (document.body.innerText || "").toLowerCase();
+        return text.includes('currently unavailable') || 
+               text.includes('out of stock') || 
+               text.includes('sold out') ||
+               text.includes('page not found') ||
+               text.includes('we couldn\'t find the page') ||
+               text.includes('something went wrong');
+    });
+
+    // Bail out gracefully if it's broken or out of stock
+    if (isUnavailable) {
+        console.log(`⚠️ Product is Out of Stock or Missing on JioMart: ${url}`);
+        return null;
+    }
+
+    // Extract the price using the visual heuristic
+    const priceText = await page.evaluate(() => {
+      const extractNumbers = (text) => {
+          const match = text.replace(/,/g, '').match(/\d+(\.\d{1,2})?/);
+          return match ? `₹${match[0]}` : null;
+      };
+
+      let maxFontSize = 0;
+      let bestPrice = null;
+
+      // Priority 1: Check known classes
+      const allPrices = Array.from(document.querySelectorAll('.PriceContainer__currentPrice, .jm-heading-xl, .product-price'));
+      
+      for (let el of allPrices) {
+         if (el.closest('.swiper-container') || el.closest('.carousel') || el.closest('.slick-slider') || el.closest('aside')) {
+             continue;
+         }
+
+         if (el.textContent && el.textContent.includes('₹')) {
+             const style = window.getComputedStyle(el);
+             if (style.textDecoration.includes('line-through')) continue;
+
+             const fontSize = parseFloat(style.fontSize) || 0;
+             if (fontSize > maxFontSize) {
+                 const cleaned = extractNumbers(el.textContent);
+                 if (cleaned) {
+                     maxFontSize = fontSize;
+                     bestPrice = cleaned;
+                 }
+             }
+         }
+      }
+
+      if (bestPrice) return bestPrice;
+
+      // Priority 2: Fallback to scanning all elements for the largest Rupee text
+      const allElements = Array.from(document.querySelectorAll('*'));
+      for (let el of allElements) {
+         if (el.children.length > 0) continue; 
+         if (!el.textContent || !el.textContent.includes('₹')) continue;
+         if (el.closest('.swiper-container') || el.closest('.carousel') || el.closest('.slick-slider')) continue;
+
+         const style = window.getComputedStyle(el);
+         if (style.textDecoration.includes('line-through') || el.textContent.includes('%')) continue;
+
+         const fontSize = parseFloat(style.fontSize) || 0;
+         if (fontSize > maxFontSize) {
+             const cleaned = extractNumbers(el.textContent);
+             if (cleaned) {
+                 maxFontSize = fontSize;
+                 bestPrice = cleaned;
+             }
+         }
+      }
+
+      return bestPrice;
+    });
+
+    if (!priceText) {
+      console.log(`⚠️ Could not find JioMart price selectors for URL: ${url}`);
+      await page.screenshot({ path: 'jiomart-error.png', fullPage: true });
+      return null;
+    }
+
+    console.log(`💰 JioMart price found: ${priceText}`);
+    return priceText;
+
+  } catch (error) {
+    console.error(`❌ Error scraping JioMart: ${error.message}`);
+    return null;
+  } finally {
+    if (browser) await browser.close();
+  }
+}
+
+// --- UPDATED: Main Export ---
+async function scrapeProductPrice(url) {
+  if (url.includes('amazon')) return await scrapeAmazon(url);
+  else if (url.includes('nykaa')) return await scrapeNykaa(url);
+  else if (url.includes('snapdeal')) return await scrapeSnapdeal(url);
+  else if (url.includes('reliancedigital')) return await scrapeRelianceDigital(url);
+  else if (url.includes('myntra')) return await scrapeMyntra(url);
+  else if (url.includes('jiomart')) return await scrapeJioMart(url); // <-- Added JioMart
+  else {
+    console.warn(`⚠️ Unsupported website attempted: ${url}`);
+    return null; 
+  }
+}
+
+module.exports = { scrapeProductPrice, launchBrowser };
