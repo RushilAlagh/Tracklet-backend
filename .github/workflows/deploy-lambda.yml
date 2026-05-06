@@ -16,7 +16,8 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '22.x'
+          # Changed to 20.x because AWS Lambda's latest managed Node.js runtime is 20.x
+          node-version: '20.x'
 
       - name: Install zip
         run: sudo apt-get install zip
@@ -36,16 +37,26 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Update Lambda function code
+      - name: Upload to S3 and Update Lambda function code
         run: |
           cd backend
+          
+          # 1. Upload the heavy zip to your S3 bucket (bypasses 50MB limit)
+          aws s3 cp lambda.zip s3://${{ secrets.S3_BUCKET_NAME }}/lambda.zip
+          
+          # 2. Tell Lambda to update itself using the file in S3
           aws lambda update-function-code \
             --function-name ${{ secrets.LAMBDA_FUNCTION_NAME }} \
-            --zip-file fileb://lambda.zip
+            --s3-bucket ${{ secrets.S3_BUCKET_NAME }} \
+            --s3-key lambda.zip
+            
+          # 3. Wait for the update to process before moving to API Gateway
+          aws lambda wait function-updated \
+            --function-name ${{ secrets.LAMBDA_FUNCTION_NAME }}
 
       - name: Redeploy all APIs
         run: |
           aws apigateway create-deployment \
             --rest-api-id ${{ secrets.API_ID }} \
             --stage-name ${{ secrets.API_STAGE }} \
-            --description "Redeploy API after Lambda update"
+            --description "Redeploy API after Lambda update via S3"
