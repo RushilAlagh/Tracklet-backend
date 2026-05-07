@@ -26,7 +26,6 @@ function cleanEcommerceURL(rawUrl) {
       parsedUrl.hostname.includes('snapdeal') || 
       parsedUrl.hostname.includes('nykaa') || 
       parsedUrl.hostname.includes('reliancedigital') ||
-      parsedUrl.hostname.includes('myntra') ||
       parsedUrl.hostname.includes('jiomart') // <-- Added JioMart
     ) {
       return parsedUrl.origin + parsedUrl.pathname;

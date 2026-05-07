@@ -369,112 +369,7 @@ async function scrapeNykaa(url) {
   }
 }
 
-// --- NEW: Myntra Scraper (With Stealth Headers) ---
-async function scrapeMyntra(url) {
-  let browser, page;
-  try {
-    const browserInstance = await launchBrowser();
-    browser = browserInstance.browser;
-    page = browserInstance.page;
-
-    // 1. Force Desktop View
-    await page.setViewport({ width: 1920, height: 1080 });
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    
-    // 2. 🛡️ INJECT STEALTH HEADERS: Trick Myntra's firewall into thinking this is a real Chrome browser
-    await page.setExtraHTTPHeaders({
-        'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'sec-ch-ua': '"Google Chrome";v="120", "Chromium";v="120", "Not?A_Brand";v="24"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1'
-    });
-
-    // 3. Aggressive blocking: Allow stylesheets, block heavy media/fonts
-    await page.setRequestInterception(true);
-    page.on('request', (req) => {
-      const blocked = ['image', 'media', 'font', 'websocket', 'manifest'];
-      if (blocked.includes(req.resourceType())) {
-        req.abort(); 
-      } else {
-        req.continue(); 
-      }
-    });
-    
-    // 4. Try to load, but ignore timeouts
-    try {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    } catch (e) {
-      console.log("⚠️ page.goto timed out for Myntra, checking for price anyway...");
-    }
-
-    // Give React time to render the DOM
-    await new Promise(r => setTimeout(r, 3000));
-
-    // 5. Debugging: Check the title to see if we bypassed the WAF
-    const title = await page.evaluate(() => {
-        const titleEl = document.querySelector('h1.pdp-title, h1.pdp-name, title');
-        return titleEl ? titleEl.innerText.trim() : 'Unknown Title';
-    });
-    console.log(`🤖 Bot sees Myntra Title: ${title}`);
-
-    const priceText = await page.evaluate(() => {
-      // ✅ Priority 1: The exact strong tag
-      let priceElement = document.querySelector('.pdp-price strong');
-      if (priceElement && priceElement.innerText.includes('₹')) {
-          return priceElement.innerText;
-      }
-
-      // ✅ Priority 2: Semantic Myntra Classes
-      const semanticSelectors = ['.pdp-price', '.pdp-selling-price', 'span.pdp-price'];
-      for (let selector of semanticSelectors) {
-        const elements = document.querySelectorAll(selector);
-        for (let el of elements) {
-          if (el && el.textContent && el.textContent.includes('₹')) {
-            return el.textContent.trim();
-          }
-        }
-      }
-
-      // ✅ Priority 3: Smart Search Fallback
-      const elements = Array.from(document.querySelectorAll('span, div, h1, h2, h3, h4, strong, b'));
-      const priceRegex = /₹\s?(\d{1,3}(,\d{2,3})*)/; 
-      
-      for (let el of elements) {
-        if (el.children.length === 0 && el.textContent && priceRegex.test(el.textContent)) {
-           const style = window.getComputedStyle(el);
-           if (!style.textDecoration.includes('line-through') && !el.closest('.pdp-mrp')) {
-               return el.textContent.trim();
-           }
-        }
-      }
-      return null;
-    });
-
-    if (!priceText) {
-      console.log(`⚠️ Could not find Myntra price selectors for URL: ${url}`);
-      await page.screenshot({ path: '/tmp/myntra-error.png', fullPage: true });
-      return null;
-    }
-
-    console.log(`💰 Myntra price found: ${priceText}`);
-    return priceText;
-
-  } catch (error) {
-    console.error(`❌ Error scraping Myntra: ${error.message}`);
-    return null;
-  } finally {
-    if (browser) await browser.close();
-  }
-}
-
-
-// --- FINAL: JioMart Scraper (Robust 404 & Stock Checking) ---
+// --- FINAL: JioMart Scraper (Merged Font-Size Heuristic, Stealth & Local Inventory) ---
 async function scrapeJioMart(url) {
   let browser, page;
   try {
@@ -482,21 +377,35 @@ async function scrapeJioMart(url) {
     browser = browserInstance.browser;
     page = browserInstance.page;
 
-    // Force a massive desktop viewport so we don't get the mobile layout
+    // 1. Force a massive desktop viewport so we don't get the mobile layout
     await page.setViewport({ width: 1920, height: 1080 });
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
     
-    // Block heavy assets to speed up loading
+    // 2. 🛡️ Stealth Headers
+    await page.setExtraHTTPHeaders({
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    });
+
+    // 3. 📍 Hyperlocal Grocery Bypass: Inject pincode cookie to check local Haridwar inventory
+    await page.setCookie({
+        name: 'pincode',
+        value: '249403',
+        domain: '.jiomart.com',
+        path: '/'
+    });
+
+    // 4. Block heavy assets to speed up loading
     await page.setRequestInterception(true);
     page.on('request', (req) => {
-      if (['image', 'media', 'websocket'].includes(req.resourceType())) {
+      if (['image', 'media', 'websocket', 'font'].includes(req.resourceType())) {
         req.abort(); 
       } else {
         req.continue(); 
       }
     });
     
-    // Load the page
+    // 5. Load the page
     try {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     } catch (e) {
@@ -510,7 +419,7 @@ async function scrapeJioMart(url) {
     await page.keyboard.press('Escape');
     await new Promise(r => setTimeout(r, 500));
     
-    // 🛑 THE FIX: Wait for EITHER the price to appear OR an error message to appear
+    // 🛑 Wait for EITHER the price to appear OR an error message to appear
     try {
         await page.waitForFunction(() => {
             const text = (document.body.innerText || "").toLowerCase();
@@ -520,7 +429,7 @@ async function scrapeJioMart(url) {
                            text.includes('page not found') ||
                            text.includes('we couldn\'t find the page') ||
                            text.includes('something went wrong');
-            const hasPrice = !!document.querySelector('.PriceContainer__currentPrice, .jm-heading-xl, .product-price');
+            const hasPrice = !!document.querySelector('.PriceContainer__currentPrice, .jm-heading-xl, .product-price, .jm-heading-s');
             
             return isDead || hasPrice;
         }, { timeout: 15000 });
@@ -545,7 +454,7 @@ async function scrapeJioMart(url) {
         return null;
     }
 
-    // Extract the price using the visual heuristic
+    // 🎯 Extract the price using your visual heuristic (Largest Font Size)
     const priceText = await page.evaluate(() => {
       const extractNumbers = (text) => {
           const match = text.replace(/,/g, '').match(/\d+(\.\d{1,2})?/);
@@ -556,7 +465,7 @@ async function scrapeJioMart(url) {
       let bestPrice = null;
 
       // Priority 1: Check known classes
-      const allPrices = Array.from(document.querySelectorAll('.PriceContainer__currentPrice, .jm-heading-xl, .product-price'));
+      const allPrices = Array.from(document.querySelectorAll('.PriceContainer__currentPrice, .jm-heading-xl, .product-price, .jm-heading-s'));
       
       for (let el of allPrices) {
          if (el.closest('.swiper-container') || el.closest('.carousel') || el.closest('.slick-slider') || el.closest('aside')) {
@@ -605,7 +514,8 @@ async function scrapeJioMart(url) {
 
     if (!priceText) {
       console.log(`⚠️ Could not find JioMart price selectors for URL: ${url}`);
-      await page.screenshot({ path: 'jiomart-error.png', fullPage: true });
+      // 🚨 CRITICAL LAMBDA FIX: Use /tmp/ directory
+      await page.screenshot({ path: '/tmp/jiomart-error.png', fullPage: true });
       return null;
     }
 
@@ -626,7 +536,6 @@ async function scrapeProductPrice(url) {
   else if (url.includes('nykaa')) return await scrapeNykaa(url);
   else if (url.includes('snapdeal')) return await scrapeSnapdeal(url);
   else if (url.includes('reliancedigital')) return await scrapeRelianceDigital(url);
-  else if (url.includes('myntra')) return await scrapeMyntra(url);
   else if (url.includes('jiomart')) return await scrapeJioMart(url); // <-- Added JioMart
   else {
     console.warn(`⚠️ Unsupported website attempted: ${url}`);
