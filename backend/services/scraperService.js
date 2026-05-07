@@ -369,7 +369,7 @@ async function scrapeNykaa(url) {
   }
 }
 
-// --- NEW: Myntra Scraper ---
+// --- NEW: Myntra Scraper (Fixed for AWS Lambda & Desktop View) ---
 async function scrapeMyntra(url) {
   let browser, page;
   try {
@@ -377,9 +377,11 @@ async function scrapeMyntra(url) {
     browser = browserInstance.browser;
     page = browserInstance.page;
 
+    // 1. Force Desktop View (Critical for consistent selectors)
+    await page.setViewport({ width: 1920, height: 1080 });
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     
-    // Aggressive blocking: Allow stylesheets, block heavy media/fonts
+    // 2. Aggressive blocking: Allow stylesheets, block heavy media/fonts
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const blocked = ['image', 'media', 'font', 'websocket', 'manifest'];
@@ -390,18 +392,32 @@ async function scrapeMyntra(url) {
       }
     });
     
-    // 🚀 THE NUCLEAR OPTION: Try to load, but ignore timeouts
+    // 3. Try to load, but ignore timeouts
     try {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     } catch (e) {
       console.log("⚠️ page.goto timed out for Myntra, checking for price anyway...");
     }
 
-    // Give React time to render
+    // Give React time to render the DOM
     await new Promise(r => setTimeout(r, 3000));
 
+    // 4. Debugging: Check the title. 
+    // If Myntra blocks us, the title usually says "Access Denied" or "Buy Shoes..."
+    const title = await page.evaluate(() => {
+        const titleEl = document.querySelector('h1.pdp-title, h1.pdp-name, title');
+        return titleEl ? titleEl.innerText.trim() : 'Unknown Title';
+    });
+    console.log(`🤖 Bot sees Myntra Title: ${title}`);
+
     const priceText = await page.evaluate(() => {
-      // Priority 1: Semantic Myntra Classes
+      // ✅ Priority 1: The exact strong tag you found inside the price container
+      let priceElement = document.querySelector('.pdp-price strong');
+      if (priceElement && priceElement.innerText.includes('₹')) {
+          return priceElement.innerText;
+      }
+
+      // ✅ Priority 2: Semantic Myntra Classes
       const semanticSelectors = ['.pdp-price', '.pdp-selling-price', 'span.pdp-price'];
       for (let selector of semanticSelectors) {
         const elements = document.querySelectorAll(selector);
@@ -412,7 +428,7 @@ async function scrapeMyntra(url) {
         }
       }
 
-      // Priority 2: Smart Search Fallback
+      // ✅ Priority 3: Smart Search Fallback
       const elements = Array.from(document.querySelectorAll('span, div, h1, h2, h3, h4, strong, b'));
       const priceRegex = /₹\s?(\d{1,3}(,\d{2,3})*)/; 
       
@@ -430,7 +446,9 @@ async function scrapeMyntra(url) {
 
     if (!priceText) {
       console.log(`⚠️ Could not find Myntra price selectors for URL: ${url}`);
-      await page.screenshot({ path: 'myntra-error.png', fullPage: true });
+      // 🚨 CRITICAL FIX: Must save to /tmp/ in AWS Lambda
+      await page.screenshot({ path: '/tmp/myntra-error.png', fullPage: true });
+      console.log("📸 Saved debug screenshot to /tmp/myntra-error.png");
       return null;
     }
 
@@ -444,7 +462,6 @@ async function scrapeMyntra(url) {
     if (browser) await browser.close();
   }
 }
-
 // --- FINAL: JioMart Scraper (Robust 404 & Stock Checking) ---
 async function scrapeJioMart(url) {
   let browser, page;
