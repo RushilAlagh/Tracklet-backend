@@ -369,7 +369,7 @@ async function scrapeNykaa(url) {
   }
 }
 
-// --- NEW: Myntra Scraper (Fixed for AWS Lambda & Desktop View) ---
+// --- NEW: Myntra Scraper (With Stealth Headers) ---
 async function scrapeMyntra(url) {
   let browser, page;
   try {
@@ -377,11 +377,25 @@ async function scrapeMyntra(url) {
     browser = browserInstance.browser;
     page = browserInstance.page;
 
-    // 1. Force Desktop View (Critical for consistent selectors)
+    // 1. Force Desktop View
     await page.setViewport({ width: 1920, height: 1080 });
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     
-    // 2. Aggressive blocking: Allow stylesheets, block heavy media/fonts
+    // 2. 🛡️ INJECT STEALTH HEADERS: Trick Myntra's firewall into thinking this is a real Chrome browser
+    await page.setExtraHTTPHeaders({
+        'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'sec-ch-ua': '"Google Chrome";v="120", "Chromium";v="120", "Not?A_Brand";v="24"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1'
+    });
+
+    // 3. Aggressive blocking: Allow stylesheets, block heavy media/fonts
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const blocked = ['image', 'media', 'font', 'websocket', 'manifest'];
@@ -392,7 +406,7 @@ async function scrapeMyntra(url) {
       }
     });
     
-    // 3. Try to load, but ignore timeouts
+    // 4. Try to load, but ignore timeouts
     try {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     } catch (e) {
@@ -402,8 +416,7 @@ async function scrapeMyntra(url) {
     // Give React time to render the DOM
     await new Promise(r => setTimeout(r, 3000));
 
-    // 4. Debugging: Check the title. 
-    // If Myntra blocks us, the title usually says "Access Denied" or "Buy Shoes..."
+    // 5. Debugging: Check the title to see if we bypassed the WAF
     const title = await page.evaluate(() => {
         const titleEl = document.querySelector('h1.pdp-title, h1.pdp-name, title');
         return titleEl ? titleEl.innerText.trim() : 'Unknown Title';
@@ -411,7 +424,7 @@ async function scrapeMyntra(url) {
     console.log(`🤖 Bot sees Myntra Title: ${title}`);
 
     const priceText = await page.evaluate(() => {
-      // ✅ Priority 1: The exact strong tag you found inside the price container
+      // ✅ Priority 1: The exact strong tag
       let priceElement = document.querySelector('.pdp-price strong');
       if (priceElement && priceElement.innerText.includes('₹')) {
           return priceElement.innerText;
@@ -434,7 +447,6 @@ async function scrapeMyntra(url) {
       
       for (let el of elements) {
         if (el.children.length === 0 && el.textContent && priceRegex.test(el.textContent)) {
-           // Skip MRP strikethroughs
            const style = window.getComputedStyle(el);
            if (!style.textDecoration.includes('line-through') && !el.closest('.pdp-mrp')) {
                return el.textContent.trim();
@@ -446,9 +458,7 @@ async function scrapeMyntra(url) {
 
     if (!priceText) {
       console.log(`⚠️ Could not find Myntra price selectors for URL: ${url}`);
-      // 🚨 CRITICAL FIX: Must save to /tmp/ in AWS Lambda
       await page.screenshot({ path: '/tmp/myntra-error.png', fullPage: true });
-      console.log("📸 Saved debug screenshot to /tmp/myntra-error.png");
       return null;
     }
 
@@ -462,6 +472,8 @@ async function scrapeMyntra(url) {
     if (browser) await browser.close();
   }
 }
+
+
 // --- FINAL: JioMart Scraper (Robust 404 & Stock Checking) ---
 async function scrapeJioMart(url) {
   let browser, page;
