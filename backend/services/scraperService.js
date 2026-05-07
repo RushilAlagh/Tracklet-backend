@@ -369,7 +369,7 @@ async function scrapeNykaa(url) {
   }
 }
 
-// --- JioMart Scraper (Fixed: waitForSelector + JSON-LD Bypass) ---
+// --- JioMart Scraper (Stealth Bot-Detection Bypass) ---
 async function scrapeJioMart(url) {
   let browser, page;
   try {
@@ -377,22 +377,62 @@ async function scrapeJioMart(url) {
     browser = browserInstance.browser;
     page = browserInstance.page;
 
-    await page.setViewport({ width: 1920, height: 1080 });
+    // ─── Stealth: remove Puppeteer fingerprints before anything else ──────────
+    await page.evaluateOnNewDocument(() => {
+      // Hide webdriver flag
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+      // Fake plugins (real Chrome has plugins, headless has none)
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => [1, 2, 3, 4, 5],
+      });
+
+      // Fake languages
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en'],
+      });
+
+      // Fake chrome runtime (headless Chrome lacks window.chrome)
+      window.chrome = {
+        runtime: {},
+        loadTimes: () => {},
+        csi: () => {},
+        app: {},
+      };
+
+      // Permissions spoof
+      const originalQuery = window.navigator.permissions.query;
+      window.navigator.permissions.query = (parameters) =>
+        parameters.name === 'notifications'
+          ? Promise.resolve({ state: Notification.permission })
+          : originalQuery(parameters);
+    });
+
+    // Common laptop resolution, not a suspicious 1920 server resolution
+    await page.setViewport({ width: 1366, height: 768 });
 
     await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     );
 
     await page.setExtraHTTPHeaders({
       'Accept-Language': 'en-US,en;q=0.9',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-      'Referer': 'https://www.jiomart.com/',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Referer': 'https://www.google.com/', // simulate arriving from Google search
+      'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"Windows"',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'cross-site',
+      'Upgrade-Insecure-Requests': '1',
     });
 
     // Set pincode cookie BEFORE navigation
     await page.setCookie({
       name: 'pincode',
-      value: '249403', // Haridwar pincode
+      value: '249403',
       domain: '.jiomart.com',
       path: '/',
     });
@@ -407,21 +447,25 @@ async function scrapeJioMart(url) {
       }
     });
 
-    // Navigate to page
+    // ─── Navigate ─────────────────────────────────────────────────────────────
     try {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
     } catch (e) {
       console.log('⚠️ page.goto timed out for JioMart, checking anyway...');
     }
 
-    // Short settle, then dismiss any popups
-    await new Promise((r) => setTimeout(r, 500));
+    // Human-like random delay (800ms–2s)
+    await new Promise((r) => setTimeout(r, 800 + Math.random() * 1200));
     await page.keyboard.press('Escape');
+    await new Promise((r) => setTimeout(r, 300));
+
+    // ─── Debug: log page title so you can see what JioMart served ────────────
+    const pageTitle = await page.title();
+    const pageUrl   = page.url();
+    console.log(`📄 JioMart page title: "${pageTitle}" | final URL: ${pageUrl}`);
 
     // ─── PRIORITY 1: JSON-LD SEO Bypass ───────────────────────────────────────
-    // Extract price directly from structured data before touching the visual DOM.
-    // This runs immediately after DOMContentLoaded — no need to wait for JS render.
-    let seoPrice = await page.evaluate(() => {
+    const seoPrice = await page.evaluate(() => {
       const scripts = document.querySelectorAll('script[type="application/ld+json"]');
       for (let script of scripts) {
         try {
@@ -430,14 +474,10 @@ async function scrapeJioMart(url) {
           for (let item of items) {
             if (item['@type'] === 'Product' && item.offers) {
               const offer = Array.isArray(item.offers) ? item.offers[0] : item.offers;
-              if (offer && offer.price) {
-                return `₹${offer.price}`;
-              }
+              if (offer && offer.price) return `₹${offer.price}`;
             }
           }
-        } catch (err) {
-          // Ignore individual parse errors
-        }
+        } catch (_) {}
       }
       return null;
     });
@@ -447,104 +487,132 @@ async function scrapeJioMart(url) {
       return seoPrice;
     }
 
-    // ─── PRIORITY 2: Wait for visual price element, then scrape ───────────────
-    // waitForSelector replaces the fixed 2s delay — it exits as soon as
-    // the element exists and is visible, so it's both faster and reliable.
-    try {
-      await page.waitForSelector(
-        '.PriceContainer__currentPrice, .jm-heading-xl, .product-price',
-        { visible: true, timeout: 10000 }
-      );
-    } catch (e) {
-      console.log('⚠️ Price selector never appeared within 10s, attempting visual fallback...');
-    }
-
-    // ─── Check for unavailability before scraping ──────────────────────────────
-    const isUnavailable = await page.evaluate(() => {
-      const text = (document.body.innerText || '').toLowerCase();
-      return (
-        text.includes('currently unavailable') ||
-        text.includes('out of stock') ||
-        text.includes('sold out') ||
-        text.includes('page not found') ||
-        text.includes("we couldn't find the page") ||
-        text.includes('something went wrong')
-      );
+    // ─── PRIORITY 2: Open Graph / meta tag price ──────────────────────────────
+    const metaPrice = await page.evaluate(() => {
+      const el =
+        document.querySelector('meta[property="product:price:amount"]') ||
+        document.querySelector('meta[itemprop="price"]') ||
+        document.querySelector('meta[name="twitter:data1"]');
+      if (el) {
+        const val = el.getAttribute('content') || el.getAttribute('value');
+        if (val && /\d/.test(val)) return `₹${val.replace(/[^\d.]/g, '')}`;
+      }
+      return null;
     });
 
-    if (isUnavailable) {
-      console.log(`⚠️ Product unavailable / page missing on JioMart: ${url}`);
-      await page.screenshot({ path: '/tmp/jiomart-error.png', fullPage: true });
+    if (metaPrice) {
+      console.log(`💰 JioMart price via meta tag: ${metaPrice}`);
+      return metaPrice;
+    }
+
+    // ─── Diagnose what we actually got from the server ────────────────────────
+    const pageStatus = await page.evaluate(() => {
+      const text = (document.body.innerText || '').toLowerCase();
+      const html = document.body.innerHTML || '';
+      return {
+        isBlocked:
+          text.includes('access denied') ||
+          text.includes('robot') ||
+          text.includes('captcha') ||
+          text.includes('unusual traffic') ||
+          text.includes('security check'),
+        isUnavailable:
+          text.includes('currently unavailable') ||
+          text.includes('out of stock') ||
+          text.includes('sold out') ||
+          text.includes('page not found') ||
+          text.includes("we couldn't find the page") ||
+          text.includes('something went wrong'),
+        hasPriceClass:
+          html.includes('PriceContainer') ||
+          html.includes('jm-heading-xl') ||
+          html.includes('product-price'),
+        bodySnippet: text.substring(0, 400),
+      };
+    });
+
+    console.log(
+      `🔍 Page status: blocked=${pageStatus.isBlocked} | unavailable=${pageStatus.isUnavailable} | hasPriceClass=${pageStatus.hasPriceClass}`
+    );
+    console.log(`📝 Body snippet: ${pageStatus.bodySnippet}`);
+
+    if (pageStatus.isBlocked) {
+      console.log(`🚫 JioMart bot-detection triggered. Taking screenshot.`);
+      await page.screenshot({ path: '/tmp/jiomart-blocked.png', fullPage: false });
       return null;
+    }
+
+    // Only bail on unavailable if there's also no price markup in the HTML at all
+    if (pageStatus.isUnavailable && !pageStatus.hasPriceClass) {
+      console.log(`⚠️ Product genuinely unavailable on JioMart: ${url}`);
+      await page.screenshot({ path: '/tmp/jiomart-unavailable.png', fullPage: false });
+      return null;
+    }
+
+    // ─── PRIORITY 3: Wait for visual price element ────────────────────────────
+    try {
+      await page.waitForSelector(
+        '.PriceContainer__currentPrice, .jm-heading-xl, .product-price, [class*="currentPrice"], [class*="selling-price"]',
+        { visible: true, timeout: 12000 }
+      );
+    } catch (e) {
+      console.log('⚠️ Price selector still not visible after 12s — attempting broad sweep');
     }
 
     // ─── Visual price extraction ───────────────────────────────────────────────
     const priceText = await page.evaluate(() => {
-      const extractNumbers = (text) => {
+      const extractNumber = (text) => {
         const match = text.replace(/,/g, '').match(/\d+(\.\d{1,2})?/);
         return match ? `₹${match[0]}` : null;
       };
 
-      let maxFontSize = 0;
-      let bestPrice = null;
-
-      // Pass 1: check known price class selectors first
-      const knownSelectors = Array.from(
-        document.querySelectorAll(
-          '.PriceContainer__currentPrice, .jm-heading-xl, .product-price, .jm-heading-s'
-        )
-      );
-
-      for (let el of knownSelectors) {
-        // Skip carousels, sliders, sidebars
-        if (
+      const isInCarousel = (el) =>
+        !!(
           el.closest('.swiper-container') ||
           el.closest('.carousel') ||
           el.closest('.slick-slider') ||
-          el.closest('aside')
+          el.closest('aside') ||
+          el.closest('[class*="related"]') ||
+          el.closest('[class*="similar"]') ||
+          el.closest('[class*="recommend"]')
+        );
+
+      let maxFontSize = 0;
+      let bestPrice = null;
+
+      // Pass 1: known price class selectors
+      const knownPriceEls = Array.from(
+        document.querySelectorAll(
+          '.PriceContainer__currentPrice, .jm-heading-xl, .product-price, .jm-heading-s, [class*="currentPrice"], [class*="selling-price"]'
         )
-          continue;
+      );
 
-        if (!el.textContent || !el.textContent.includes('₹')) continue;
-
+      for (let el of knownPriceEls) {
+        if (isInCarousel(el)) continue;
+        if (!el.textContent?.includes('₹')) continue;
         const style = window.getComputedStyle(el);
-        if (style.textDecoration.includes('line-through')) continue; // skip strikethrough (MRP)
-
+        if (style.textDecoration.includes('line-through')) continue;
         const fontSize = parseFloat(style.fontSize) || 0;
         if (fontSize > maxFontSize) {
-          const cleaned = extractNumbers(el.textContent);
-          if (cleaned) {
-            maxFontSize = fontSize;
-            bestPrice = cleaned;
-          }
+          const cleaned = extractNumber(el.textContent);
+          if (cleaned) { maxFontSize = fontSize; bestPrice = cleaned; }
         }
       }
 
       if (bestPrice) return bestPrice;
 
-      // Pass 2: broad sweep — find the largest ₹ text on the page
-      const allElements = Array.from(document.querySelectorAll('*'));
-      for (let el of allElements) {
-        if (el.children.length > 0) continue; // leaf nodes only
-        if (!el.textContent || !el.textContent.includes('₹')) continue;
-        if (
-          el.closest('.swiper-container') ||
-          el.closest('.carousel') ||
-          el.closest('.slick-slider')
-        )
-          continue;
-
+      // Pass 2: broad leaf-node sweep — find the largest ₹ value on the page
+      for (let el of Array.from(document.querySelectorAll('*'))) {
+        if (el.children.length > 0) continue;
+        if (!el.textContent?.includes('₹')) continue;
+        if (isInCarousel(el)) continue;
         const style = window.getComputedStyle(el);
         if (style.textDecoration.includes('line-through')) continue;
-        if (el.textContent.includes('%')) continue; // skip discount badges
-
+        if (el.textContent.includes('%')) continue;
         const fontSize = parseFloat(style.fontSize) || 0;
         if (fontSize > maxFontSize) {
-          const cleaned = extractNumbers(el.textContent);
-          if (cleaned) {
-            maxFontSize = fontSize;
-            bestPrice = cleaned;
-          }
+          const cleaned = extractNumber(el.textContent);
+          if (cleaned) { maxFontSize = fontSize; bestPrice = cleaned; }
         }
       }
 
@@ -552,8 +620,8 @@ async function scrapeJioMart(url) {
     });
 
     if (!priceText) {
-      console.log(`⚠️ Could not find JioMart price visually for URL: ${url}`);
-      await page.screenshot({ path: '/tmp/jiomart-error.png', fullPage: true });
+      console.log(`⚠️ Could not find price visually. Taking screenshot for inspection.`);
+      await page.screenshot({ path: '/tmp/jiomart-error.png', fullPage: false });
       return null;
     }
 
