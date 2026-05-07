@@ -1,6 +1,5 @@
-const AWS = require("aws-sdk");
-const crypto = require("crypto");
 const docClient = require("../config/dynamoConfig");
+const crypto = require("crypto");
 
 const TABLE_NAME = "Products";
 const GSI_NAME = "User_Email-index"; // GSI to fetch user's tracked products
