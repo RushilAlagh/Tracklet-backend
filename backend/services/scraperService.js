@@ -68,10 +68,13 @@ async function setUserAgentAndBlockResources(page) {
   });
 }
 
+// AMAZON SCRAPER (FULL OPTIMIZED VERSION)
+
 const scrapeAmazon = async (url) => {
   let browser, page;
 
   try {
+    // Note: Assumes launchBrowser() is defined elsewhere in your file
     const browserInstance = await launchBrowser();
     browser = browserInstance.browser;
     page = browserInstance.page;
@@ -80,7 +83,7 @@ const scrapeAmazon = async (url) => {
     await page.setViewport({ width: 1920, height: 1080 });
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
-    // 2. Call your existing resource blocker to save memory
+    // 2. Call your existing resource blocker to save memory and speed up load times
     await setUserAgentAndBlockResources(page);
 
     await page.goto(url, {
@@ -98,28 +101,36 @@ const scrapeAmazon = async (url) => {
     });
     console.log(`🤖 Bot sees Title: ${title}`);
 
-    // 4. Extract the exact Buy Box price
+    // 4. Extract the exact Buy Box price safely using refined safe-zone selectors
     const priceText = await page.evaluate(() => {
       let priceElement;
 
-      // ✅ Priority 1: Strict Desktop Buy Box Selector (Ignores related products entirely)
+      // ✅ Priority 1: Strict Desktop Buy Box 
       priceElement = document.querySelector('#corePriceDisplay_desktop_feature_div .a-price-whole');
       if (priceElement) return priceElement.innerText;
 
-      // ✅ Priority 2: Alternative Desktop Buy Box container
-      priceElement = document.querySelector('#apex_desktop .a-price .a-offscreen');
+      // ✅ Priority 2: Alternative Desktop container
+      priceElement = document.querySelector('#apex_desktop .a-price-whole');
       if (priceElement) return priceElement.innerText;
 
-      // ✅ Priority 3: Legacy Amazon Desktop Layouts
+      // ✅ Priority 3: The Center Column (Very Safe)
+      // This is the middle of the page with the title and bullets. 
+      // It completely ignores the "Sponsored" rows at the bottom.
+      priceElement = document.querySelector('#centerCol .a-price-whole');
+      if (priceElement) return priceElement.innerText;
+
+      // ✅ Priority 4: The Right Column (The actual Buy Box panel)
+      priceElement = document.querySelector('#rightCol .a-price-whole');
+      if (priceElement) return priceElement.innerText;
+
+      // ✅ Priority 5: Legacy Amazon Desktop Layouts
       priceElement = document.querySelector('#priceblock_ourprice');
       if (priceElement) return priceElement.innerText;
 
       priceElement = document.querySelector('#priceblock_dealprice');
       if (priceElement) return priceElement.innerText;
 
-      // Notice: Removed the broad `.a-price-whole` and Regex fallbacks 
-      // because they are guaranteed to grab sponsored product prices if the main price loads slowly.
-
+      // No broad fallback regex allowed here to prevent grabbing sponsored prices
       return null;
     });
 
