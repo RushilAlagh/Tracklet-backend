@@ -68,8 +68,6 @@ async function setUserAgentAndBlockResources(page) {
   });
 }
 
-// AMAZON SCRAPER (FULL FIXED VERSION)
-
 const scrapeAmazon = async (url) => {
   let browser, page;
 
@@ -78,6 +76,11 @@ const scrapeAmazon = async (url) => {
     browser = browserInstance.browser;
     page = browserInstance.page;
 
+    // 1. Force a strict Desktop environment to prevent mobile DOM or default location routing
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
+    // 2. Call your existing resource blocker to save memory
     await setUserAgentAndBlockResources(page);
 
     await page.goto(url, {
@@ -85,77 +88,43 @@ const scrapeAmazon = async (url) => {
       timeout: 60000
     });
 
-    // Wait for dynamic content
+    // Wait for dynamic content to load in the Buy Box
     await new Promise(r => setTimeout(r, 3000));
 
-    // Wait until price appears (best signal)
-    try {
-      await page.waitForFunction(
-        () => document.body.innerText.includes('₹'),
-        { timeout: 10000 }
-      );
-    } catch (e) {
-      console.log("⚠️ Timeout waiting for price to load");
-    }
+    // 3. Debugging: Grab the title so we know exactly what product the bot is looking at in CloudWatch
+    const title = await page.evaluate(() => {
+      const titleEl = document.querySelector('#productTitle');
+      return titleEl ? titleEl.innerText.trim() : 'Unknown Title';
+    });
+    console.log(`🤖 Bot sees Title: ${title}`);
 
+    // 4. Extract the exact Buy Box price
     const priceText = await page.evaluate(() => {
       let priceElement;
 
-      // ✅ BEST selector (full price with ₹)
-      priceElement = document.querySelector('.a-price .a-offscreen');
-      if (priceElement) return priceElement.innerText;
-
-      // Fallback 1
-      priceElement = document.querySelector('.apexPriceToPay .a-offscreen');
-      if (priceElement) return priceElement.innerText;
-
-      // Fallback 2
+      // ✅ Priority 1: Strict Desktop Buy Box Selector (Ignores related products entirely)
       priceElement = document.querySelector('#corePriceDisplay_desktop_feature_div .a-price-whole');
       if (priceElement) return priceElement.innerText;
 
-      // Fallback 3
-      priceElement = document.querySelector('#apex_desktop .a-price-whole');
+      // ✅ Priority 2: Alternative Desktop Buy Box container
+      priceElement = document.querySelector('#apex_desktop .a-price .a-offscreen');
       if (priceElement) return priceElement.innerText;
 
-      // Fallback 4
+      // ✅ Priority 3: Legacy Amazon Desktop Layouts
       priceElement = document.querySelector('#priceblock_ourprice');
       if (priceElement) return priceElement.innerText;
 
-      // Fallback 5
       priceElement = document.querySelector('#priceblock_dealprice');
       if (priceElement) return priceElement.innerText;
 
-      // Fallback 6 (your original)
-      priceElement = document.querySelector('.a-price-whole');
-      if (priceElement) return priceElement.innerText;
-
-      // 🔥 Smart fallback (VERY IMPORTANT — keep this)
-      const elements = Array.from(document.querySelectorAll('span, div, p'));
-      const priceRegex = /₹\s?(\d{1,3}(,\d{2,3})*)/;
-
-      for (let el of elements) {
-        if (
-          el.children.length === 0 &&
-          el.textContent &&
-          priceRegex.test(el.textContent)
-        ) {
-          return el.textContent.trim();
-        }
-      }
+      // Notice: Removed the broad `.a-price-whole` and Regex fallbacks 
+      // because they are guaranteed to grab sponsored product prices if the main price loads slowly.
 
       return null;
     });
 
     if (!priceText) {
-      console.log(`⚠️ Could not find any price selectors for URL: ${url}`);
-
-      // Debug screenshot
-      await page.screenshot({
-        path: 'amazon-error.png',
-        fullPage: true
-      });
-
-      console.log("📸 Saved debug screenshot: amazon-error.png");
+      console.log(`⚠️ Could not find exact desktop buy-box price for URL: ${url}`);
       return null;
     }
 
