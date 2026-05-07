@@ -369,7 +369,7 @@ async function scrapeNykaa(url) {
   }
 }
 
-// --- JioMart Scraper (Stealth Bot-Detection Bypass) ---
+// --- JioMart Scraper (Pincode Modal Fix) ---
 async function scrapeJioMart(url) {
   let browser, page;
   try {
@@ -377,30 +377,12 @@ async function scrapeJioMart(url) {
     browser = browserInstance.browser;
     page = browserInstance.page;
 
-    // ─── Stealth: remove Puppeteer fingerprints before anything else ──────────
+    // ─── Stealth patches ──────────────────────────────────────────────────────
     await page.evaluateOnNewDocument(() => {
-      // Hide webdriver flag
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-
-      // Fake plugins (real Chrome has plugins, headless has none)
-      Object.defineProperty(navigator, 'plugins', {
-        get: () => [1, 2, 3, 4, 5],
-      });
-
-      // Fake languages
-      Object.defineProperty(navigator, 'languages', {
-        get: () => ['en-US', 'en'],
-      });
-
-      // Fake chrome runtime (headless Chrome lacks window.chrome)
-      window.chrome = {
-        runtime: {},
-        loadTimes: () => {},
-        csi: () => {},
-        app: {},
-      };
-
-      // Permissions spoof
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+      window.chrome = { runtime: {}, loadTimes: () => {}, csi: () => {}, app: {} };
       const originalQuery = window.navigator.permissions.query;
       window.navigator.permissions.query = (parameters) =>
         parameters.name === 'notifications'
@@ -408,18 +390,15 @@ async function scrapeJioMart(url) {
           : originalQuery(parameters);
     });
 
-    // Common laptop resolution, not a suspicious 1920 server resolution
     await page.setViewport({ width: 1366, height: 768 });
-
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     );
-
     await page.setExtraHTTPHeaders({
       'Accept-Language': 'en-US,en;q=0.9',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
       'Accept-Encoding': 'gzip, deflate, br',
-      'Referer': 'https://www.google.com/', // simulate arriving from Google search
+      'Referer': 'https://www.google.com/',
       'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
       'sec-ch-ua-mobile': '?0',
       'sec-ch-ua-platform': '"Windows"',
@@ -429,40 +408,102 @@ async function scrapeJioMart(url) {
       'Upgrade-Insecure-Requests': '1',
     });
 
-    // Set pincode cookie BEFORE navigation
-    await page.setCookie({
-      name: 'pincode',
-      value: '249403',
-      domain: '.jiomart.com',
-      path: '/',
-    });
+    // Set ALL known JioMart pincode-related cookies before navigation
+    const PINCODE = '249403';
+    const cookies = [
+      { name: 'pincode',       value: PINCODE,    domain: '.jiomart.com', path: '/' },
+      { name: 'selected_pincode', value: PINCODE, domain: '.jiomart.com', path: '/' },
+      { name: 'userPincode',   value: PINCODE,    domain: '.jiomart.com', path: '/' },
+      { name: 'deliveryPincode', value: PINCODE,  domain: '.jiomart.com', path: '/' },
+    ];
+    await page.setCookie(...cookies);
 
-    // Block heavy resources to speed up load
+    // Block heavy resources
     await page.setRequestInterception(true);
     page.on('request', (req) => {
-      if (['image', 'media', 'websocket', 'font'].includes(req.resourceType())) {
+      const type = req.resourceType();
+      if (['image', 'media', 'websocket', 'font'].includes(type)) {
         req.abort();
       } else {
         req.continue();
       }
     });
 
-    // ─── Navigate ─────────────────────────────────────────────────────────────
+    // ─── Step 1: Load homepage first to establish session ─────────────────────
+    // JioMart checks session state. Landing directly on a product URL cold
+    // triggers the pincode modal. Going via homepage first seeds the session.
+    console.log('🏠 Loading JioMart homepage to seed session...');
+    try {
+      await page.goto('https://www.jiomart.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    } catch (e) {
+      console.log('⚠️ Homepage load timed out, continuing...');
+    }
+    await new Promise((r) => setTimeout(r, 1000 + Math.random() * 500));
+
+    // ─── Step 2: Enter pincode via the modal/input if present ─────────────────
+    try {
+      // Look for a pincode input on the homepage
+      const pincodeInput = await page.$('input[placeholder*="pincode" i], input[placeholder*="pin code" i], input[id*="pincode" i], input[name*="pincode" i], #pincode-input');
+      if (pincodeInput) {
+        console.log('📍 Found pincode input, entering pincode...');
+        await pincodeInput.click({ clickCount: 3 }); // select all existing text
+        await pincodeInput.type(PINCODE, { delay: 80 });
+        await new Promise((r) => setTimeout(r, 500));
+
+        // Try pressing Enter or clicking confirm button
+        await page.keyboard.press('Enter');
+        await new Promise((r) => setTimeout(r, 1500));
+        console.log('✅ Pincode entered on homepage');
+      } else {
+        console.log('ℹ️ No pincode input found on homepage, trying API approach...');
+      }
+    } catch (e) {
+      console.log(`⚠️ Pincode input interaction failed: ${e.message}`);
+    }
+
+    // ─── Step 3: Hit JioMart's pincode API directly ───────────────────────────
+    // This is the same API their frontend calls when you enter a pincode.
+    // Calling it directly sets the server-side session pincode.
+    try {
+      const pincodeApiResult = await page.evaluate(async (pincode) => {
+        try {
+          const res = await fetch(
+            `https://www.jiomart.com/api/service/address/pincode/validate?pincode=${pincode}`,
+            {
+              method: 'GET',
+              credentials: 'include',
+              headers: { 'Accept': 'application/json' },
+            }
+          );
+          const data = await res.json();
+          return { ok: res.ok, status: res.status, data };
+        } catch (err) {
+          return { ok: false, error: err.message };
+        }
+      }, PINCODE);
+      console.log(`📍 Pincode API result: ${JSON.stringify(pincodeApiResult)}`);
+    } catch (e) {
+      console.log(`⚠️ Pincode API call failed: ${e.message}`);
+    }
+
+    // Short wait after pincode setup
+    await new Promise((r) => setTimeout(r, 800));
+
+    // ─── Step 4: Now navigate to the actual product page ─────────────────────
+    console.log(`🛒 Navigating to product: ${url}`);
     try {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
     } catch (e) {
-      console.log('⚠️ page.goto timed out for JioMart, checking anyway...');
+      console.log('⚠️ Product page goto timed out, checking anyway...');
     }
 
-    // Human-like random delay (800ms–2s)
-    await new Promise((r) => setTimeout(r, 800 + Math.random() * 1200));
+    await new Promise((r) => setTimeout(r, 1000 + Math.random() * 1000));
     await page.keyboard.press('Escape');
     await new Promise((r) => setTimeout(r, 300));
 
-    // ─── Debug: log page title so you can see what JioMart served ────────────
+    // ─── Debug ────────────────────────────────────────────────────────────────
     const pageTitle = await page.title();
-    const pageUrl   = page.url();
-    console.log(`📄 JioMart page title: "${pageTitle}" | final URL: ${pageUrl}`);
+    console.log(`📄 Product page title: "${pageTitle}" | URL: ${page.url()}`);
 
     // ─── PRIORITY 1: JSON-LD SEO Bypass ───────────────────────────────────────
     const seoPrice = await page.evaluate(() => {
@@ -487,7 +528,7 @@ async function scrapeJioMart(url) {
       return seoPrice;
     }
 
-    // ─── PRIORITY 2: Open Graph / meta tag price ──────────────────────────────
+    // ─── PRIORITY 2: Meta tag price ───────────────────────────────────────────
     const metaPrice = await page.evaluate(() => {
       const el =
         document.querySelector('meta[property="product:price:amount"]') ||
@@ -505,14 +546,18 @@ async function scrapeJioMart(url) {
       return metaPrice;
     }
 
-    // ─── Diagnose what we actually got from the server ────────────────────────
+    // ─── Diagnose page state ──────────────────────────────────────────────────
     const pageStatus = await page.evaluate(() => {
       const text = (document.body.innerText || '').toLowerCase();
       const html = document.body.innerHTML || '';
       return {
+        isPincodeModal:
+          text.includes('enter pin code') ||
+          text.includes('enter pincode') ||
+          text.includes('enable location') ||
+          text.includes('select location'),
         isBlocked:
           text.includes('access denied') ||
-          text.includes('robot') ||
           text.includes('captcha') ||
           text.includes('unusual traffic') ||
           text.includes('security check'),
@@ -532,34 +577,81 @@ async function scrapeJioMart(url) {
     });
 
     console.log(
-      `🔍 Page status: blocked=${pageStatus.isBlocked} | unavailable=${pageStatus.isUnavailable} | hasPriceClass=${pageStatus.hasPriceClass}`
+      `🔍 Page status: pincodeModal=${pageStatus.isPincodeModal} | blocked=${pageStatus.isBlocked} | unavailable=${pageStatus.isUnavailable} | hasPriceClass=${pageStatus.hasPriceClass}`
     );
     console.log(`📝 Body snippet: ${pageStatus.bodySnippet}`);
 
+    // ─── Step 5: If pincode modal STILL showing, interact with it directly ────
+    if (pageStatus.isPincodeModal) {
+      console.log('📍 Pincode modal detected on product page — attempting direct interaction...');
+      try {
+        // Try to find and fill pincode field on the product page itself
+        await page.waitForSelector(
+          'input[placeholder*="pincode" i], input[placeholder*="pin" i], input[id*="pincode" i], .pincode-input, #pincode',
+          { visible: true, timeout: 5000 }
+        );
+        const input = await page.$(
+          'input[placeholder*="pincode" i], input[placeholder*="pin" i], input[id*="pincode" i], .pincode-input, #pincode'
+        );
+        if (input) {
+          await input.click({ clickCount: 3 });
+          await input.type(PINCODE, { delay: 100 });
+          await new Promise((r) => setTimeout(r, 400));
+          await page.keyboard.press('Enter');
+          console.log('✅ Pincode entered on product page modal');
+          // Wait for page to reload with price
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+      } catch (e) {
+        console.log(`⚠️ Could not interact with pincode modal: ${e.message}`);
+      }
+
+      // Re-check JSON-LD after pincode entry
+      const seoPrice2 = await page.evaluate(() => {
+        const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+        for (let script of scripts) {
+          try {
+            const data = JSON.parse(script.innerText);
+            const items = Array.isArray(data) ? data : [data];
+            for (let item of items) {
+              if (item['@type'] === 'Product' && item.offers) {
+                const offer = Array.isArray(item.offers) ? item.offers[0] : item.offers;
+                if (offer && offer.price) return `₹${offer.price}`;
+              }
+            }
+          } catch (_) {}
+        }
+        return null;
+      });
+
+      if (seoPrice2) {
+        console.log(`💰 JioMart price via JSON-LD (post-pincode): ${seoPrice2}`);
+        return seoPrice2;
+      }
+    }
+
     if (pageStatus.isBlocked) {
-      console.log(`🚫 JioMart bot-detection triggered. Taking screenshot.`);
+      console.log(`🚫 JioMart bot-detection triggered.`);
       await page.screenshot({ path: '/tmp/jiomart-blocked.png', fullPage: false });
       return null;
     }
 
-    // Only bail on unavailable if there's also no price markup in the HTML at all
     if (pageStatus.isUnavailable && !pageStatus.hasPriceClass) {
       console.log(`⚠️ Product genuinely unavailable on JioMart: ${url}`);
-      await page.screenshot({ path: '/tmp/jiomart-unavailable.png', fullPage: false });
       return null;
     }
 
-    // ─── PRIORITY 3: Wait for visual price element ────────────────────────────
+    // ─── PRIORITY 3: Wait for visual price ───────────────────────────────────
     try {
       await page.waitForSelector(
         '.PriceContainer__currentPrice, .jm-heading-xl, .product-price, [class*="currentPrice"], [class*="selling-price"]',
         { visible: true, timeout: 12000 }
       );
     } catch (e) {
-      console.log('⚠️ Price selector still not visible after 12s — attempting broad sweep');
+      console.log('⚠️ Price selector still not visible after 12s — broad sweep next');
     }
 
-    // ─── Visual price extraction ───────────────────────────────────────────────
+    // ─── Visual price extraction ──────────────────────────────────────────────
     const priceText = await page.evaluate(() => {
       const extractNumber = (text) => {
         const match = text.replace(/,/g, '').match(/\d+(\.\d{1,2})?/);
@@ -580,13 +672,12 @@ async function scrapeJioMart(url) {
       let maxFontSize = 0;
       let bestPrice = null;
 
-      // Pass 1: known price class selectors
+      // Pass 1: known price selectors
       const knownPriceEls = Array.from(
         document.querySelectorAll(
           '.PriceContainer__currentPrice, .jm-heading-xl, .product-price, .jm-heading-s, [class*="currentPrice"], [class*="selling-price"]'
         )
       );
-
       for (let el of knownPriceEls) {
         if (isInCarousel(el)) continue;
         if (!el.textContent?.includes('₹')) continue;
@@ -598,10 +689,9 @@ async function scrapeJioMart(url) {
           if (cleaned) { maxFontSize = fontSize; bestPrice = cleaned; }
         }
       }
-
       if (bestPrice) return bestPrice;
 
-      // Pass 2: broad leaf-node sweep — find the largest ₹ value on the page
+      // Pass 2: broad leaf-node sweep
       for (let el of Array.from(document.querySelectorAll('*'))) {
         if (el.children.length > 0) continue;
         if (!el.textContent?.includes('₹')) continue;
@@ -615,12 +705,11 @@ async function scrapeJioMart(url) {
           if (cleaned) { maxFontSize = fontSize; bestPrice = cleaned; }
         }
       }
-
       return bestPrice;
     });
 
     if (!priceText) {
-      console.log(`⚠️ Could not find price visually. Taking screenshot for inspection.`);
+      console.log(`⚠️ Could not find price visually. Taking screenshot.`);
       await page.screenshot({ path: '/tmp/jiomart-error.png', fullPage: false });
       return null;
     }
